@@ -1,0 +1,8 @@
+.DS_Store
+*.rou.xml
+*.rou.alt.xml
+trips.trips*.xml
+*.pyc
+*.dump.xml
+configurations/test_dump.xml
+configurations/testTrace.xml

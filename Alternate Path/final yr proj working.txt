@@ -1,0 +1,134 @@
+Here is exactly what happens now, in order, and the logic behind each step.
+
+1. Scenario Setup
+
+Hero deadline is 1800 simulation steps in main.py:31.
+A huge congestion stream is injected on the direct route (5000 vehicles, 0.03s spacing) in main.py:218.
+The hero starts with the direct path but is controlled by dynamic policy in main.py:177.
+So initial intent is: try direct, then reroute only if it is truly beneficial.
+2. Simulation Loop Behavior
+
+Main loop runs in core/STR_SUMO.py:100.
+Hero is tracked for:
+spawn step,
+reroute step,
+arrival step,
+edges visited.
+While hero is active, direct-route traffic stats are sampled only during hero’s trip window in core/STR_SUMO.py:136.
+Important fix: hero is re-evaluated every step even if stuck on same edge in core/STR_SUMO.py:208.
+3. Congestion Detection
+
+Policy checks upcoming edges on the direct route in controller/DynamicReroutePolicy.py:22.
+It computes density per edge and flags congestion if above threshold (0.5 in your config from main.py:177).
+This is only a trigger to evaluate rerouting, not an automatic switch now.
+4. ETA-Based Decision (Core Logic)
+
+Policy estimates remaining ETA for both direct and alternative routes in controller/DynamicReroutePolicy.py:76.
+For each edge, ETA uses:
+edge length,
+mean speed from SUMO,
+occupancy-based penalty (higher occupancy => lower effective speed).
+Then it logs [ETA CHECK] ... at controller/DynamicReroutePolicy.py:125.
+5. Conservative Reroute Gate
+
+Reroute happens only if alternative is significantly better:
+required gain = max(20s, 25% of direct ETA) at controller/DynamicReroutePolicy.py:128.
+condition: alt_eta + required_gain < direct_eta at controller/DynamicReroutePolicy.py:129.
+If true: [DYNAMIC REROUTING TRIGGERED] in controller/DynamicReroutePolicy.py:135.
+If false: [REROUTE SKIPPED] ... in controller/DynamicReroutePolicy.py:144.
+6. Final Report Logic
+
+Report prints hero timing and reroute timing in core/STR_SUMO.py:343.
+It computes and prints:
+counterfactual direct time with traffic in core/STR_SUMO.py:358,
+actual alternate time,
+signed delta under TIME IMPACT OF REROUTING in core/STR_SUMO.py:370.
+So now the comparison is:
+fairer (hero-window traffic),
+and mathematically correct (no fake 0.00 slower case).
+What this means practically
+
+The car no longer reroutes just because “there is congestion”.
+It reroutes only when the ETA model says the detour wins by a meaningful margin.
+That is why your latest run showed:
+direct with traffic much higher,
+alternate actual lower,
+positive savings.
+
+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+
+Direct vs alternate is decided in controller/DynamicReroutePolicy.py with a 3-stage gate:
+
+Start state
+Hero starts on direct plan (hero_current_plan = "direct").
+It can switch at most once (hero_has_rerouted flag).
+Congestion trigger
+_check_route_congestion() scans upcoming edges on the direct route from current position.
+For each edge, it computes density:
+density = vehicle_count / (edge_length / 100) (vehicles per 100m)
+If any edge density > congestion_threshold (set to 0.5 in main.py), congestion is considered detected.
+ETA comparison gate (actual decision)
+On congestion, it computes:
+direct_eta = _estimate_path_time(current_edge, direct_path)
+alt_eta = _estimate_path_time(current_edge, alternative_path)
+_estimate_path_time() does per-edge travel time:
+reads edge mean speed (traci.edge.getLastStepMeanSpeed)
+reads occupancy (traci.edge.getLastStepOccupancy)
+applies congestion penalty to speed:
+congestion_penalty = 1 + max(0, occ - 0.10) * 5
+effective_speed = max(0.3, speed / congestion_penalty)
+sums edge_length / effective_speed across remaining edges
+It reroutes only if alternative is significantly better:
+required_gain = max(20.0, 0.25 * direct_eta)
+condition: alt_eta + required_gain < direct_eta
+If true:
+switch to alternative,
+lock reroute (hero_has_rerouted = True),
+save ETA snapshot for reporting.
+If false:
+stay on direct ([REROUTE SKIPPED]).
+Execution detail in simulation:
+
+In core/STR_SUMO.py, the hero is re-evaluated every step even if it hasn’t changed edge yet, so this logic can trigger while waiting at the same node.
+So in short:
+
+Congestion alone does not force reroute anymore.
+Reroute happens only when ETA says alternate wins by a clear margin.
+
+
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------\
+
+
+
+
+
+
+Summarizing switching logic
+Great question. Here is exactly how it judges:
+
+It uses a two-stage judgment:
+
+Congestion check first
+It looks ahead on the direct path and checks traffic density on upcoming roads.
+If congestion is not high enough, it keeps direct.
+Time comparison second
+If congestion is high, it estimates travel time for both options from the hero’s current position:
+direct path ETA
+alternate path ETA
+It only switches if alternate is clearly better, not just slightly better.
+It requires a minimum benefit margin before switching (a fixed minimum plus a percentage margin).
+So “judge” means:
+Is direct congested? and then Is alternate significantly faster right now?
+
+About “every stop” decision:
+
+It evaluates the hero repeatedly at each simulation step (including while waiting/stuck on the same edge), so yes, it keeps checking continuously.
+But route switching is one-time in this setup:
+starts on direct
+may switch once to alternate
+after switching, it does not switch back and forth.
+So:
+
+Checks happen continuously
+Plan change happens at most once (direct -> alternate)
